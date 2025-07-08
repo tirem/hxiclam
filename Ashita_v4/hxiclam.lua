@@ -31,7 +31,7 @@ local logs = T {
 
 -- Default Settings
 local default_settings = T {
-    visible = T {true},
+    visible = T {false},
     moon_display = T {false},
     display_timeout = T {600},
     opacity = T {1.0},
@@ -70,7 +70,11 @@ local default_settings = T {
     enable_tone = T {true},
     tone = 'clam.wav',
     tone_selected_idx = 1,
-    available_tones = T {'clam.wav'}
+    available_tones = T {'clam.wav'},
+    
+    enable_turnin_tone = T {true},
+    turnin_tone = 'clam.wav',
+    turnin_tone_selected_idx = 1
 };
 
 -- HXIClam Variables
@@ -88,7 +92,12 @@ local hxiclam = T {
     weights = T {},
     gil_per_hour = 0,
 
-    play_tone = false
+    play_tone = false,
+    play_turnin_tone = false,
+    turnin_sound_played = false,
+    dig_ready_sound_played = false,
+    has_bucket = false,
+    bucket_broken = false
 };
 
 local MAX_HEIGHT_IN_LINES = 26;
@@ -103,6 +112,12 @@ local function split(inputstr, sep)
         table.insert(t, str);
     end
     return t;
+end
+
+local function clean_item_name(item_name)
+    -- Remove "handful of" from the beginning of item names to make them more concise
+    local cleaned = item_name:gsub("^handful of ", "");
+    return cleaned;
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -239,7 +254,7 @@ local function update_pricing()
     for k, v in pairs(hxiclam.settings.item_index) do
         for k2, v2 in pairs(split(v, ':')) do
             if (k2 == 1) then itemname = v2; end
-            if (k2 == 2) then itemvalue = v2; end
+            if (k2 == 2) then itemvalue = tonumber(v2) or 0; end
         end
 
         hxiclam.pricing[itemname] = itemvalue;
@@ -252,7 +267,7 @@ local function update_weights()
     for k, v in pairs(hxiclam.settings.item_weight_index) do
         for k2, v2 in pairs(split(v, ':')) do
             if (k2 == 1) then itemname = v2; end
-            if (k2 == 2) then itemvalue = v2; end
+            if (k2 == 2) then itemvalue = tonumber(v2) or 0; end
         end
 
         hxiclam.weights[itemname] = itemvalue;
@@ -262,7 +277,7 @@ local function update_weights()
     for k, v in pairs(hxiclam.settings.bucket) do
         if (hxiclam.weights[k] ~= nil) then
             hxiclam.settings.bucket_weight =
-                hxiclam.settings.bucket_weight + hxiclam.weights[k];
+                hxiclam.settings.bucket_weight + (hxiclam.weights[k] * v);
         end
     end
 end
@@ -290,6 +305,7 @@ local function clear_bucket()
     hxiclam.settings.bucket = {};
     hxiclam.settings.bucket_weight = 0;
     hxiclam.settings.bucket_capacity = 50;
+    hxiclam.turnin_sound_played = false; -- Reset turnin sound flag
 end
 
 local function play_sound()
@@ -297,6 +313,12 @@ local function play_sound()
         ashita.misc.play_sound(("%stones/%s"):format(addon.path,
                                                      hxiclam.settings.tone));
         hxiclam.play_tone = false;
+    end
+    
+    if (hxiclam.settings.enable_turnin_tone[1] == true and hxiclam.play_turnin_tone == true) then
+        ashita.misc.play_sound(("%stones/%s"):format(addon.path,
+                                                     hxiclam.settings.turnin_tone));
+        hxiclam.play_turnin_tone = false;
     end
 end
 
@@ -333,6 +355,27 @@ local function render_general_config(settings)
     if (imgui.ArrowButton("Tone_Test", ImGuiDir_Right)) then
         ashita.misc.play_sound(("%stones/%s"):format(addon.path,
                                                      hxiclam.settings.tone));
+    end
+    
+    imgui.Checkbox('Enable turnin sound', hxiclam.settings.enable_turnin_tone);
+    imgui.ShowHelp(
+        'Enable/Disable a tone to be played when the bucket is nearly full and ready to turn in.');
+    imgui.SameLine();
+    if (imgui.BeginCombo('##turnin', hxiclam.settings.turnin_tone)) then
+        for k, v in pairs(hxiclam.settings.available_tones) do
+            local is_selected = k == hxiclam.settings.turnin_tone_selected_idx;
+            if (imgui.Selectable(v, is_selected)) then
+                hxiclam.settings.turnin_tone_selected_idx = k;
+                hxiclam.settings.turnin_tone = v;
+            end
+            if (is_selected) then imgui.SetItemDefaultFocus(); end
+        end
+        imgui.EndCombo();
+    end
+    imgui.SameLine();
+    if (imgui.ArrowButton("Turnin_Tone_Test", ImGuiDir_Right)) then
+        ashita.misc.play_sound(("%stones/%s"):format(addon.path,
+                                                     hxiclam.settings.turnin_tone));
     end
     imgui.SliderFloat('Opacity', hxiclam.settings.opacity, 0.125, 1.0, '%.3f');
     imgui.ShowHelp('The opacity of the HXIClam window.');
@@ -379,18 +422,19 @@ local function render_general_config(settings)
         hxiclam.settings.session_view = 2;
     end
     imgui.ShowHelp('Shows full session details.');
-    if (imgui.RadioButton('Dig Timer Count Up',
-                          hxiclam.settings.dig_timer_countdown == false)) then
-        hxiclam.settings.dig_timer_countdown = false;
-    end
-    imgui.ShowHelp('Dig timer will count up to 9 and then display Dig Ready.');
-    imgui.SameLine();
-    if (imgui.RadioButton('Dig Timer Count Down',
-                          hxiclam.settings.dig_timer_countdown == true)) then
-        hxiclam.settings.dig_timer_countdown = true;
-    end
-    imgui.ShowHelp(
-        'Dig timer will count down from 10 and then display Dig Ready.');
+    -- Commented out since we now use a progress bar instead of counting
+    --if (imgui.RadioButton('Dig Timer Count Up',
+    --                      hxiclam.settings.dig_timer_countdown == false)) then
+    --    hxiclam.settings.dig_timer_countdown = false;
+    --end
+    --imgui.ShowHelp('Dig timer will count up to 9 and then display Dig Ready.');
+    --imgui.SameLine();
+    --if (imgui.RadioButton('Dig Timer Count Down',
+    --                      hxiclam.settings.dig_timer_countdown == true)) then
+    --    hxiclam.settings.dig_timer_countdown = true;
+    --end
+    --imgui.ShowHelp(
+    --    'Dig timer will count down from 10 and then display Dig Ready.');
     imgui.Checkbox('Subtract Bucket Cost',
                    hxiclam.settings.clamming.bucket_subtract);
     imgui.ShowHelp(
@@ -724,11 +768,25 @@ ashita.events.register('text_in', 'text_in_cb', function(e)
     -- Clear bucket and add to bucket count when a bucket is obtained.
     if (bucket) then
         clear_bucket();
+        hxiclam.has_bucket = true; -- Player now has a bucket
+        hxiclam.bucket_broken = false; -- Reset broken state
         hxiclam.settings.bucket_count = hxiclam.settings.bucket_count + 1;
+        
+        -- Set last_dig to current time so timer doesn't think it's ready immediately
+        hxiclam.settings.last_dig = ashita.time.clock()['ms'];
+        
+        -- Reset dig ready sound flag so it doesn't play immediately
+        hxiclam.dig_ready_sound_played = false;
     elseif (item) then
-        hxiclam.play_tone = true;
+        -- If we're digging items, we must have a bucket
+        hxiclam.has_bucket = true;
+        hxiclam.bucket_broken = false;
+        
         -- Update last dig time and reset dig_timer
         hxiclam.settings.last_dig = ashita.time.clock()['ms'];
+        
+        -- Reset dig ready sound flag for new dig cycle
+        hxiclam.dig_ready_sound_played = false;
 
         if (hxiclam.settings.dig_timer_countdown) then
             hxiclam.settings.dig_timer = 10;
@@ -755,8 +813,10 @@ ashita.events.register('text_in', 'text_in_cb', function(e)
         end
     elseif (bucket_upgrade) then
         hxiclam.settings.bucket_capacity = bucket_upgrade;
-    elseif (bucket_turnin) then
+        elseif (bucket_turnin) then
         if (hxiclam.settings.bucket ~= nil and hxiclam.settings.bucket ~= {}) then
+            -- Only add to rewards if bucket wasn't broken (lost items shouldn't count toward session stats)
+            if (not hxiclam.bucket_broken) then
             for k, v in pairs(hxiclam.settings.bucket) do
                 hxiclam.settings.item_count = hxiclam.settings.item_count + v;
                 if (hxiclam.settings.rewards[k] == nil) then
@@ -769,13 +829,32 @@ ashita.events.register('text_in', 'text_in_cb', function(e)
                 -- Log the items turned in
                 if (hxiclam.settings.enable_logging[1]) then
                     for i = 1, v do WriteLog('turnin', k); end
+                    end
                 end
             end
             clear_bucket();
         end
+        hxiclam.has_bucket = false; -- No longer has bucket after turning it in
+        hxiclam.bucket_broken = false; -- Reset broken state after turnin
+        hxiclam.turnin_sound_played = false; -- Reset turnin sound flag
     end
 
-    if (overweight or incident) then clear_bucket(); end
+    if (overweight or incident) then 
+        hxiclam.has_bucket = false; -- No longer has bucket (broken), but keep contents visible
+        hxiclam.bucket_broken = true; -- Mark as broken to show "Broken Bucket"
+        hxiclam.turnin_sound_played = false; -- Reset turnin sound flag
+    end
+end);
+
+--[[
+* event: packet_in
+* desc : Event called when a packet is received from the server.
+--]]
+ashita.events.register('packet_in', 'zonename_packet_in', function(event)
+    if event.id == 0x0A then  -- Check if it's a zone change packet
+        -- Hide the HXIClam window when zoning
+        hxiclam.settings.visible[1] = false;
+    end
 end);
 
 --[[
@@ -806,6 +885,11 @@ ashita.events.register('d3d_present', 'present_cb', function()
 
     imgui.SetNextWindowBgAlpha(hxiclam.settings.opacity[1]);
     imgui.SetNextWindowSize({-1, -1}, ImGuiCond_Always);
+    
+    -- Set rounded corners for prettier appearance
+    imgui.PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0);
+    imgui.PushStyleVar(ImGuiStyleVar_ChildRounding, 4.0);
+    
     if (imgui.Begin('HXIClam##Display', hxiclam.settings.visible[1],
                     bit.bor(ImGuiWindowFlags_NoDecoration,
                             ImGuiWindowFlags_AlwaysAutoResize,
@@ -842,66 +926,200 @@ ashita.events.register('d3d_present', 'present_cb', function()
         local moon_phase = moon_table.MoonPhase;
         local moon_percent = moon_table.MoonPhasePercent;
 
-        imgui.SetWindowFontScale(hxiclam.settings.font_scale[1] + 0.1);
-        imgui.Text('Bucket Stats:');
         imgui.SetWindowFontScale(hxiclam.settings.bucket_weight_font_scale[1]);
-        imgui.Text('Bucket Weight: ');
-        imgui.SameLine();
+        
+        -- Calculate bucket total first
+        local bucket_total = 0;
+        for k, v in pairs(hxiclam.settings.bucket) do
+            if (hxiclam.pricing[k] ~= nil) then
+                bucket_total = bucket_total + hxiclam.pricing[k] * v;
+            end
+        end
+        
+        -- Calculate text widths to prevent overlap
+        local weight_text = 'Weight: ' .. tostring(hxiclam.settings.bucket_weight) .. ' / ' .. hxiclam.settings.bucket_capacity .. 'pz';
+        local profit_text = 'Value: ' .. format_int(bucket_total) .. 'g';
+        local weight_width = imgui.CalcTextSize(weight_text);
+        local profit_width = imgui.CalcTextSize(profit_text);
+        local min_spacing = 20; -- minimum pixels between weight and profit
+        local window_width = imgui.GetWindowSize();
+        
+        -- Ensure minimum window width to prevent overlap
+        local min_window_width = weight_width + profit_width + min_spacing + 20; -- 20 for padding
+        if (window_width < min_window_width) then
+            imgui.SetNextWindowSize({min_window_width, -1}, ImGuiCond_Always);
+            window_width = min_window_width;
+        end
+        
+        -- Left side: Weight
         if ((hxiclam.settings.bucket_capacity - hxiclam.settings.bucket_weight) <=
             hxiclam.settings.bucket_weight_crit_threshold[1]) then
             imgui.TextColored(hxiclam.settings.bucket_weight_crit_color,
-                              tostring(hxiclam.settings.bucket_weight) .. '/' ..
-                                  hxiclam.settings.bucket_capacity);
+                              'Weight: ' .. tostring(hxiclam.settings.bucket_weight) .. ' / ' ..
+                                  hxiclam.settings.bucket_capacity .. 'pz');
         elseif ((hxiclam.settings.bucket_capacity -
             hxiclam.settings.bucket_weight) <=
             hxiclam.settings.bucket_weight_warn_threshold[1]) then
             imgui.TextColored(hxiclam.settings.bucket_weight_warn_color,
-                              tostring(hxiclam.settings.bucket_weight) .. '/' ..
-                                  hxiclam.settings.bucket_capacity);
+                              'Weight: ' .. tostring(hxiclam.settings.bucket_weight) .. ' / ' ..
+                                  hxiclam.settings.bucket_capacity .. 'pz');
         else
-            imgui.Text(tostring(hxiclam.settings.bucket_weight) .. '/' ..
-                           hxiclam.settings.bucket_capacity);
+            imgui.Text('Weight: ' .. tostring(hxiclam.settings.bucket_weight) .. ' / ' ..
+                           hxiclam.settings.bucket_capacity .. 'pz');
         end
+        
+        -- Right side: Profit with safe positioning
+        imgui.SameLine();
+        local safe_profit_x = math.max(weight_width + min_spacing, window_width - profit_width - 10);
+        imgui.SetCursorPosX(safe_profit_x);
+        imgui.Text(profit_text);
+        
         imgui.SetWindowFontScale(hxiclam.settings.font_scale[1]);
 
-        imgui.Text('Dig Timer: ');
-        imgui.SameLine();
-        if (timer_display == 'Dig Ready') then
-            imgui.TextColored(hxiclam.settings.dig_timer_ready_color,
-                              tostring(timer_display));
-            play_sound();
-        else
-            imgui.Text(tostring(timer_display));
+        -- Dig Timer Progress Bar - smooth calculation using real time
+        local dig_progress, dig_ready, show_text, bar_text, bar_color;
+        
+        -- Check if bucket is nearly full (5 ponzes or less remaining)
+        local bucket_space_remaining = hxiclam.settings.bucket_capacity - hxiclam.settings.bucket_weight;
+        local bucket_nearly_full = hxiclam.has_bucket and bucket_space_remaining <= 5;
+        
+        if (hxiclam.bucket_broken) then
+            -- Broken bucket - show full red bar with "Broken Bucket"
+            dig_progress = 1.0;
+            dig_ready = false;
+            show_text = true;
+            bar_text = 'Broken Bucket';
+            bar_color = {1.0, 0.0, 0.0, 1.0}; -- red
+        elseif (not hxiclam.has_bucket) then
+            -- No bucket - show full blue bar with "No Bucket"
+            dig_progress = 1.0;
+            dig_ready = false;
+            show_text = true;
+            bar_text = 'No Bucket';
+            bar_color = {0.2, 0.6, 1.0, 1.0}; -- blue
+        elseif (bucket_nearly_full) then
+            -- Bucket nearly full - show rainbow blinking "Turn In Bucket"
+            dig_progress = 1.0;
+            dig_ready = false;
+            show_text = true;
+            bar_text = 'Turn In Bucket';
+            
+            -- Clear sound flag when in turn-in mode (don't play dig ready sound)
+            hxiclam.play_tone = false;
+            
+            -- Mark dig ready sound as played so it doesn't play when transitioning back
+            hxiclam.dig_ready_sound_played = true;
+            
+            -- Play turnin sound only once when bucket first becomes nearly full
+            if (not hxiclam.turnin_sound_played) then
+                hxiclam.play_turnin_tone = true;
+                hxiclam.turnin_sound_played = true;
+            end
+            
+            -- Rainbow color cycle using time-based hue rotation
+            local time = ashita.time.clock()['ms'] / 500.0; -- Speed of color change
+            local hue = (time % 6.0); -- 6 color segments in rainbow
+            
+            if (hue < 1.0) then
+                bar_color = {1.0, hue, 0.0, 1.0}; -- Red to Yellow
+            elseif (hue < 2.0) then
+                bar_color = {2.0 - hue, 1.0, 0.0, 1.0}; -- Yellow to Green
+            elseif (hue < 3.0) then
+                bar_color = {0.0, 1.0, hue - 2.0, 1.0}; -- Green to Cyan
+            elseif (hue < 4.0) then
+                bar_color = {0.0, 4.0 - hue, 1.0, 1.0}; -- Cyan to Blue
+            elseif (hue < 5.0) then
+                bar_color = {hue - 4.0, 0.0, 1.0, 1.0}; -- Blue to Magenta
+            else
+                bar_color = {1.0, 0.0, 6.0 - hue, 1.0}; -- Magenta to Red
+            end
+                else
+            -- Normal dig timer logic
+            local current_time = ashita.time.clock()['ms'];
+            local time_since_dig = (current_time - hxiclam.settings.last_dig) / 1000.0; -- convert to seconds
+            dig_progress = math.min(time_since_dig / 10.0, 1.0); -- clamp to 1.0 max
+            dig_ready = dig_progress >= 1.0;
+            show_text = dig_ready;
+            bar_text = 'Dig Ready';
+            
+            -- Reset turnin sound flag when bucket is no longer nearly full
+            hxiclam.turnin_sound_played = false;
+            
+            -- Only reset dig ready sound flag if the timer is not ready yet
+            if (not dig_ready) then
+                hxiclam.dig_ready_sound_played = false;
+            end
+            
+            if (dig_ready) then
+                bar_color = {0.0, 0.7, 0.0, 1.0}; -- darker green for better text visibility
+                -- Only play dig ready sound once when it becomes ready
+                if (not hxiclam.dig_ready_sound_played) then
+                    hxiclam.play_tone = true;
+                    hxiclam.dig_ready_sound_played = true;
+                end
+            else
+                bar_color = {1.0, 0.6, 0.0, 1.0}; -- orange
+            end
         end
+
+        -- Set progress bar color
+        imgui.PushStyleColor(ImGuiCol_PlotHistogram, bar_color);
+        
+        -- Calculate scaled progress bar height based on weight font scale
+        local base_bar_height = 20;
+        local scaled_bar_height = base_bar_height * hxiclam.settings.bucket_weight_font_scale[1];
+        
+        -- Draw progress bar
+        imgui.ProgressBar(dig_progress, {-1, scaled_bar_height}, '');
+        
+        -- Draw text overlay with better visibility
+        if (show_text) then
+            -- Set font scale back to weight font scale for text calculations
+            imgui.SetWindowFontScale(hxiclam.settings.bucket_weight_font_scale[1]);
+            
+            local bar_pos_x, bar_pos_y = imgui.GetItemRectMin();
+            local bar_size_x, bar_size_y = imgui.GetItemRectSize();
+            local text_size_x, text_size_y = imgui.CalcTextSize(bar_text);
+            local text_x = bar_pos_x + (bar_size_x - text_size_x) * 0.5; -- center horizontally
+            local text_y = bar_pos_y + (bar_size_y - text_size_y) * 0.5; -- center vertically
+            
+            -- Draw text with dark outline for better visibility
+            local draw_list = imgui.GetWindowDrawList();
+            draw_list:AddText({text_x + 1, text_y + 1}, 0xFF000000, bar_text); -- black outline
+            draw_list:AddText({text_x, text_y}, 0xFFFFFFFF, bar_text); -- white text
+            
+            -- Reset to general font scale after drawing
+            imgui.SetWindowFontScale(hxiclam.settings.font_scale[1]);
+        end
+        
+        imgui.PopStyleColor();
+        
+        -- Play any pending sounds
+        play_sound();
 
         local bucket_contents = '';
         for k, v in pairs(hxiclam.settings.bucket) do
             local itemTotal = 0;
             if (hxiclam.pricing[k] ~= nil) then
-                bucket_total = bucket_total + hxiclam.pricing[k] * v;
                 itemTotal = v * hxiclam.pricing[k];
             end
+            
+            local display_name = clean_item_name(k);
 
             if (bucket_contents == '') then
-                bucket_contents = k .. ': ' .. 'x' .. format_int(v) .. ' (' ..
+                bucket_contents = display_name .. ': ' .. 'x' .. format_int(v) .. ' (' ..
                                       format_int(itemTotal) .. 'g)';
             else
-                bucket_contents = bucket_contents .. '\n' .. k .. ': ' .. 'x' ..
+                bucket_contents = bucket_contents .. '\n' .. display_name .. ': ' .. 'x' ..
                                       format_int(v) .. ' (' ..
                                       format_int(itemTotal) .. 'g)';
             end
         end
 
-        if (hxiclam.settings.clamming.bucket_subtract[1]) then
-            bucket_total = bucket_total -
-                               hxiclam.settings.clamming.bucket_cost[1];
-            imgui.Text('Bucket Profit: ' .. format_int(bucket_total) .. 'g');
-        else
-            imgui.Text('Bucket Revenue: ' .. format_int(bucket_total) .. 'g');
+        if (bucket_contents ~= '') then
+            imgui.Separator();
+            imgui.Text(bucket_contents);
         end
-        imgui.Separator();
-
-        imgui.Text(bucket_contents);
 
         if (hxiclam.settings.session_view > 0) then
             imgui.Separator();
@@ -927,7 +1145,8 @@ ashita.events.register('d3d_present', 'present_cb', function()
                 end
 
                 if (hxiclam.settings.session_view > 1) then
-                    imgui.Text(k .. ': ' .. 'x' .. format_int(v) .. ' (' ..
+                    local display_name = clean_item_name(k);
+                    imgui.Text(display_name .. ': ' .. 'x' .. format_int(v) .. ' (' ..
                                    format_int(itemTotal) .. 'g)');
                 end
             end
@@ -935,31 +1154,28 @@ ashita.events.register('d3d_present', 'present_cb', function()
                 imgui.Separator();
             end
 
+            -- Calculate profit for gil per hour (always subtract bucket costs)
+            local total_profit = total_worth - (hxiclam.settings.bucket_count * hxiclam.settings.clamming.bucket_cost[1]);
+            
+            -- only update gil_per_hour every 3 seconds (always based on profit)
+            if ((ashita.time.clock()['s'] % 3) == 0) then
+                hxiclam.gil_per_hour = math.floor((total_profit / elapsed_time) * 3600);
+            end
+            
             if (hxiclam.settings.clamming.bucket_subtract[1]) then
-                total_worth = total_worth -
-                                  (hxiclam.settings.bucket_count *
-                                      hxiclam.settings.clamming.bucket_cost[1]);
-                -- only update gil_per_hour every 3 seconds
-                if ((ashita.time.clock()['s'] % 3) == 0) then
-                    hxiclam.gil_per_hour =
-                        math.floor((total_worth / elapsed_time) * 3600);
-                end
-                imgui.Text('Total Profit: ' .. format_int(total_worth) .. 'g' ..
+                imgui.Text('Total Profit: ' .. format_int(total_profit) .. 'g' ..
                                ' (' .. format_int(hxiclam.gil_per_hour) ..
                                ' gph)');
             else
-                -- only update gil_per_hour every 3 seconds
-                if ((ashita.time.clock()['s'] % 3) == 0) then
-                    hxiclam.gil_per_hour =
-                        math.floor((total_worth / elapsed_time) * 3600);
-                end
-                imgui.Text(
-                    'Total Revenue: ' .. format_int(total_worth) .. 'g' .. ' (' ..
+                imgui.Text('Total Revenue: ' .. format_int(total_worth) .. 'g' .. ' (' ..
                         format_int(hxiclam.gil_per_hour) .. ' gph)');
             end
         end
     end
     imgui.End();
+    
+    -- Restore original styling
+    imgui.PopStyleVar(2); -- Pop both WindowRounding and ChildRounding
 
 end);
 
