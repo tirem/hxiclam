@@ -6,6 +6,9 @@ The addon is more complete in the Ashita version due to originally being develop
 All existing items in HorizonXI's clamming pool are included in the default settings, but if something is ever missing it can be added in the settings.
 
 ## Screenshots
+### Ashita v4 Tirem updates
+![Alt text](/Media/hxiclam_tirem_1.png?raw=true)
+
 ### Ashita v4
 ![Alt text](/Media/hxiclam_1.png?raw=true)
 
